@@ -1,0 +1,5 @@
+# Assistant configuration
+# Secrets (API keys, tokens) must NEVER be stored here. Use .env instead.
+
+[orchestrator]
+max_steps = 5
