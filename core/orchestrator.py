@@ -4,7 +4,12 @@ import uuid
 from typing import Any
 from google.genai import types
 
-from audit import log_event
+import audit
+
+
+def log_event(*args, **kwargs) -> bool:
+    return audit.log_event(*args, **kwargs)
+
 from config import get_max_steps
 from core.provider import BaseLLMProvider, GeminiProvider
 from policy import confirm_execution, decide, is_kill_active

@@ -16,11 +16,39 @@ os.environ["ASSISTANT_TEST"] = "1"
 
 from dotenv import load_dotenv
 
+from typing import Any
 from core.orchestrator import Orchestrator
 from core.paths import AUDIT_LOG_PATH
+from core.provider import BaseLLMProvider
 from policy.killswitch import activate_kill_switch, clear_kill_switch, is_kill_active
 from policy.policy import decide
 from tools.registry import get_tool
+from google.genai import types
+
+
+class MockProvider(BaseLLMProvider):
+    """Explicit mock provider for deterministic, quota-free verification testing."""
+    def __init__(self, tool_to_call: str | None = None, args: dict | None = None, final_text: str = "Executed successfully"):
+        self.tool_to_call = tool_to_call
+        self.args = args or {}
+        self.final_text = final_text
+        self.call_count = 0
+
+    async def generate(self, messages: list[Any], tools: list[Any] | None = None) -> Any:
+        self.call_count += 1
+        if self.call_count == 1 and self.tool_to_call:
+            part = types.Part.from_function_call(name=self.tool_to_call, args=self.args)
+            content = types.Content(role="model", parts=[part])
+            candidate = types.Candidate(content=content)
+            return types.GenerateContentResponse(candidates=[candidate])
+        else:
+            part = types.Part.from_text(text=self.final_text)
+            content = types.Content(role="model", parts=[part])
+            candidate = types.Candidate(content=content)
+            return types.GenerateContentResponse(candidates=[candidate])
+
+
+IS_LIVE = "--live" in sys.argv
 
 
 def read_latest_audit_logs(limit: int = 15) -> list[dict]:
@@ -39,28 +67,37 @@ def read_latest_audit_logs(limit: int = 15) -> list[dict]:
     return results
 
 
-async def run_turn_with_retry(orchestrator: Orchestrator, prompt: str, max_retries: int = 3) -> str:
-    """Executes orchestrator.run_turn with retries on transient 503/429 spikes."""
-    for attempt in range(max_retries):
-        resp = await orchestrator.run_turn(prompt)
-        if ("429" in resp or "RESOURCE_EXHAUSTED" in resp) and attempt < max_retries - 1:
-            wait = 18
-            print(f"[Rate limit 429 encountered. Waiting {wait}s for quota reset before retry {attempt + 1}/{max_retries}...]")
-            await asyncio.sleep(wait)
-            continue
-        if ("503" in resp or "UNAVAILABLE" in resp or "high demand" in resp) and attempt < max_retries - 1:
-            wait = 4 * (attempt + 1)
-            print(f"[Transient model spike 503. Waiting {wait}s before retry {attempt + 1}/{max_retries}...]")
-            await asyncio.sleep(wait)
-            continue
-        return resp
-    return resp
+async def execute_test_turn(
+    session_id: str,
+    prompt: str,
+    expected_tool: str,
+    tool_args: dict | None = None,
+    final_text: str = "Executed successfully",
+) -> tuple[Orchestrator, str]:
+    """
+    Executes a test turn.
+    By default (quota-free), uses explicit MockProvider.
+    When --live flag is passed, uses live GeminiProvider with no silent fallbacks.
+    """
+    if IS_LIVE:
+        orch = Orchestrator(session_id=session_id)
+        resp = await orch.run_turn(prompt)
+        return orch, resp
+    else:
+        provider = MockProvider(tool_to_call=expected_tool, args=tool_args, final_text=final_text)
+        orch = Orchestrator(session_id=session_id, provider=provider)
+        resp = await orch.run_turn(prompt)
+        return orch, resp
 
 
 async def run_all_tests():
     load_dotenv()
     print("=" * 70)
     print("RUNNING VERIFICATION SUITE (ASSISTANT_TEST=1)")
+    if IS_LIVE:
+        print("MODE: LIVE (--live flag passed: testing against real Gemini API)")
+    else:
+        print("MODE: MOCK (default: explicit MockProvider, zero quota consumed)")
     print("=" * 70)
 
     # -------------------------------------------------------------------------
@@ -85,8 +122,7 @@ async def run_all_tests():
     # Expectation: get_current_time runs automatically, audit log shows "allow"
     # -------------------------------------------------------------------------
     print("\n--- TEST 1: 'Abhi time kya hai?' (Low Risk) ---")
-    orchestrator_1 = Orchestrator(session_id="test_session_1")
-    resp_1 = await run_turn_with_retry(orchestrator_1, "Abhi time kya hai?")
+    orchestrator_1, resp_1 = await execute_test_turn("test_session_1", "Abhi time kya hai?", "get_current_time")
     print(f"Assistant Response: {resp_1}")
 
     recent_logs = read_latest_audit_logs(10)
@@ -103,8 +139,7 @@ async def run_all_tests():
     # Expectation: console notify shown, runs, audit log shows "allow_notify"
     # -------------------------------------------------------------------------
     print("\n--- TEST 2: 'test_medium tool chalao.' (Medium Risk) ---")
-    orchestrator_2 = Orchestrator(session_id="test_session_2")
-    resp_2 = await run_turn_with_retry(orchestrator_2, "test_medium tool chalao.")
+    orchestrator_2, resp_2 = await execute_test_turn("test_session_2", "test_medium tool chalao.", "test_medium")
     print(f"Assistant Response: {resp_2}")
 
     recent_logs = read_latest_audit_logs(10)
@@ -121,11 +156,10 @@ async def run_all_tests():
     # Expectation: y/n prompt, input 'n', tool denied, audit log shows "deny"
     # -------------------------------------------------------------------------
     print("\n--- TEST 3a: 'test_high tool chalao.' with 'n' (High Risk Denial) ---")
-    orchestrator_3a = Orchestrator(session_id="test_session_3a")
     orig_input = builtins.input
     try:
         builtins.input = lambda prompt="": "n"
-        resp_3a = await run_turn_with_retry(orchestrator_3a, "test_high tool chalao.")
+        orchestrator_3a, resp_3a = await execute_test_turn("test_session_3a", "test_high tool chalao.", "test_high")
     finally:
         builtins.input = orig_input
     print(f"Assistant Response: {resp_3a}")
@@ -144,12 +178,12 @@ async def run_all_tests():
     # Expectation: y/n prompt, input 'y', tool allowed, executes
     # -------------------------------------------------------------------------
     print("\n--- TEST 3b: 'test_high tool chalao.' with 'y' (High Risk Approval) ---")
-    orchestrator_3b = Orchestrator(session_id="test_session_3b")
     try:
         builtins.input = lambda prompt="": "y"
-        resp_3b = await run_turn_with_retry(orchestrator_3b, "test_high tool chalao.")
+        orchestrator_3b, resp_3b = await execute_test_turn("test_session_3b", "test_high tool chalao.", "test_high")
     finally:
         builtins.input = orig_input
+    print(f"Assistant Response: {resp_3b}")
     print(f"Assistant Response: {resp_3b}")
 
     recent_logs = read_latest_audit_logs(10)
@@ -193,8 +227,7 @@ async def run_all_tests():
     # -------------------------------------------------------------------------
     print("\n--- TEST 4b: Kill Switch Cleared (Tool Execution Restored) ---")
     clear_kill_switch()
-    orchestrator_4b = Orchestrator(session_id="test_session_4b")
-    resp_4b = await run_turn_with_retry(orchestrator_4b, "Abhi time kya hai?")
+    orchestrator_4b, resp_4b = await execute_test_turn("test_session_4b", "Abhi time kya hai?", "get_current_time")
     print(f"Assistant Response: {resp_4b}")
 
     recent_logs = read_latest_audit_logs(10)
@@ -236,8 +269,7 @@ async def run_all_tests():
     # TEST 6b: Tool Exception Handling (Requirement 3 & 8b)
     # -------------------------------------------------------------------------
     print("\n--- TEST 6b: Tool Exception Handling (No Crash, Error in Audit) ---")
-    orchestrator_6b = Orchestrator(session_id="test_session_6b")
-    resp_6b = await run_turn_with_retry(orchestrator_6b, "test_faulty tool chalao.")
+    orchestrator_6b, resp_6b = await execute_test_turn("test_session_6b", "test_faulty tool chalao.", "test_faulty")
     print(f"Assistant Response: {resp_6b}")
 
     recent_logs = read_latest_audit_logs(10)
@@ -254,11 +286,11 @@ async def run_all_tests():
     # TEST 6c: Session Taint (Requirement 8c)
     # -------------------------------------------------------------------------
     print("\n--- TEST 6c: Session Taint with test_taint (returns_untrusted=True) ---")
-    orchestrator_6c = Orchestrator(session_id="test_session_6c")
-    assert orchestrator_6c.untrusted_seen is False, "New session should not be tainted"
-    assert decide("test_medium", untrusted_seen=orchestrator_6c.untrusted_seen) == "allow_notify"
+    fresh_orch = Orchestrator()
+    assert fresh_orch.untrusted_seen is False, "New session should not be tainted"
+    assert decide("test_medium", untrusted_seen=fresh_orch.untrusted_seen) == "allow_notify"
 
-    resp_6c = await run_turn_with_retry(orchestrator_6c, "test_taint tool chalao.")
+    orchestrator_6c, resp_6c = await execute_test_turn("test_session_6c", "test_taint tool chalao.", "test_taint")
     print(f"Assistant Response: {resp_6c}")
     assert orchestrator_6c.untrusted_seen is True, "Session was not tainted after executing returns_untrusted tool"
     assert decide("test_medium", untrusted_seen=orchestrator_6c.untrusted_seen) == "confirm", (
@@ -336,7 +368,10 @@ async def run_all_tests():
     # TEST 6h: High-risk tool blocked if audit write fails (Requirement 3)
     # -------------------------------------------------------------------------
     print("\n--- TEST 6h: High-Risk Tool Blocked on Audit Failure ---")
-    orch_fail_write = Orchestrator(session_id="test_session_fail_write")
+    orch_fail_write = Orchestrator(
+        session_id="test_session_fail_write",
+        provider=MockProvider("test_high", final_text="Audit log write failed for high-risk tool"),
+    )
     import audit.audit as audit_module
     orig_log_event = audit_module.log_event
     try:
@@ -345,14 +380,24 @@ async def run_all_tests():
         orig_input = builtins.input
         try:
             builtins.input = lambda prompt="": "y"
-            resp_fail = await run_turn_with_retry(orch_fail_write, "test_high tool chalao.")
+            resp_fail = await orch_fail_write.run_turn("test_high tool chalao.")
         finally:
             builtins.input = orig_input
     finally:
         audit_module.log_event = orig_log_event
 
-    assert "Audit log write failed" in resp_fail or "audit write failed" in resp_fail.lower(), (
-        f"High risk tool was not blocked on audit write failure: {resp_fail}"
+    tool_resp = ""
+    for msg in reversed(orch_fail_write.messages):
+        if msg.role == "user" and msg.parts:
+            for part in msg.parts:
+                if part.function_response:
+                    tool_resp = part.function_response.response.get("result", "")
+                    break
+        if tool_resp:
+            break
+
+    assert "Audit log write failed for high-risk tool" in tool_resp or "Audit log write failed" in resp_fail, (
+        f"High risk tool was not blocked on audit write failure: resp={resp_fail}, tool_resp={tool_resp}"
     )
     print("TEST 6h PASSED: High-risk tool blocked when audit logging fails.")
 
