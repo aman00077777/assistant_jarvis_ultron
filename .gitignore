@@ -19,3 +19,6 @@ logs/
 
 # Data
 data/
+
+# MCP
+mcp_servers/node_modules/

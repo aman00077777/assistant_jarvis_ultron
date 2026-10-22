@@ -1,5 +1,8 @@
 # Assistant configuration
 # Secrets (API keys, tokens) must NEVER be stored here. Use .env instead.
 
+workspace_dir = "C:\\dev\\assistant-workspace"
+
 [orchestrator]
 max_steps = 5
+

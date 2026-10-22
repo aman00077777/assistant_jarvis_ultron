@@ -125,10 +125,5 @@ def run_tool(name: str, args: dict[str, Any] | None = None) -> str:
         return str(result)
     except TypeError:
         # Fallback if function takes no arguments
-        try:
-            result = tool.function()
-            return str(result)
-        except Exception as err:
-            return f"Error executing tool '{name}': {err}"
-    except Exception as err:
-        return f"Error executing tool '{name}': {err}"
+        result = tool.function()
+        return str(result)
