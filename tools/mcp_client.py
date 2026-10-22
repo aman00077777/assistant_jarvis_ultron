@@ -216,3 +216,31 @@ class FSMCPClient:
 
         result = await self._session.list_tools()
         return result.tools
+
+    async def call_tool(self, name: str, args: dict[str, Any] | None = None) -> Any:
+        """
+        Executes an MCP tool on the server.
+        Only allows tool names present in the fs_policy_map allowlist; raises ValueError otherwise.
+        """
+        from tools.fs_policy_map import ALLOWED_MCP_TOOLS, MODEL_TO_FS_POLICY
+
+        mcp_tool_name = None
+        if name in ALLOWED_MCP_TOOLS:
+            mcp_tool_name = name
+        elif name in MODEL_TO_FS_POLICY:
+            mcp_tool_name = MODEL_TO_FS_POLICY[name].mcp_name
+        else:
+            raise ValueError(
+                f"Tool '{name}' is not permitted by fs_policy_map allowlist."
+            )
+
+        if self._session is None:
+            raise RuntimeError("FSMCPClient is not connected. Use 'async with' context manager.")
+
+        if is_kill_active():
+            await self.close()
+            raise RuntimeError("Kill switch is active; refusing to execute tool.")
+
+        tool_args = args or {}
+        return await self._session.call_tool(mcp_tool_name, arguments=tool_args)
+

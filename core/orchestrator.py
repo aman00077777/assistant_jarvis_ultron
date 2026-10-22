@@ -13,7 +13,7 @@ def log_event(*args, **kwargs) -> bool:
 from config import get_max_steps
 from core.provider import BaseLLMProvider, GeminiProvider
 from policy import confirm_execution, decide, is_kill_active
-from tools import get_tools, run_tool, TOOL_REGISTRY
+from tools import get_tools, run_tool, run_tool_async, TOOL_REGISTRY
 from tools.registry import get_tool
 
 
@@ -195,7 +195,7 @@ class Orchestrator:
                     else:
                         # Orchestrator me run_tool try/except me
                         try:
-                            tool_result = run_tool(tool_name, args)
+                            tool_result = await run_tool_async(tool_name, args)
                             tool_error = None
                         except Exception as e:
                             tool_result = f"tool error: {e}"

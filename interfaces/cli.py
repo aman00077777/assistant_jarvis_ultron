@@ -78,6 +78,9 @@ async def main():
         end_session("Interrupted by Ctrl+C")
     finally:
         end_session("Session completed")
+        from tools import fs_tools
+        await fs_tools.shutdown()
+
 
 
 if __name__ == "__main__":

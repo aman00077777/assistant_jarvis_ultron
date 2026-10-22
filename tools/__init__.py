@@ -7,6 +7,7 @@ from tools.registry import (
     get_tools,
     get_tool_declarations,
     run_tool,
+    run_tool_async,
 )
 
 __all__ = [
@@ -16,4 +17,6 @@ __all__ = [
     "get_tools",
     "get_tool_declarations",
     "run_tool",
+    "run_tool_async",
 ]
+
